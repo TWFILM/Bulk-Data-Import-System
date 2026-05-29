@@ -7,7 +7,14 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class Customer extends Model
 {
-    protected $fillable = ["name", "email", "import_batch_id"];
+    protected $fillable = [
+        "name",
+        "email",
+        "phone",
+        "company",
+        "address",
+        "import_batch_id",
+    ];
 
     // ---------------------------------------------------------------
     // Relationships

@@ -90,7 +90,10 @@
                 Upload a CSV file containing customer data.
                 Required columns: <code class="bg-slate-100 px-1 rounded">name</code>,
                 <code class="bg-slate-100 px-1 rounded">email</code>.
-                Max 100 MB.
+                Optional: <code class="bg-slate-100 px-1 rounded">phone</code>,
+                <code class="bg-slate-100 px-1 rounded">company</code>,
+                <code class="bg-slate-100 px-1 rounded">address</code>.
+                Max 40 MB.
             </p>
 
             <div id="drop-zone"
@@ -415,11 +418,19 @@ dropZone.addEventListener('drop',      e => {
     if (e.dataTransfer.files.length) selectFile(e.dataTransfer.files[0]);
 });
 
+const MAX_FILE_BYTES = 40 * 1024 * 1024; // 40 MB — matches php.ini upload_max_filesize
+
 function selectFile(file) {
+    if (file.size > MAX_FILE_BYTES) {
+        showToast(`File is too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Maximum allowed size is 40 MB.`, 'error');
+        document.getElementById('csv-file').value = '';
+        return;
+    }
+
     state.file = file;
     document.getElementById('file-name-display').textContent = file.name;
     document.getElementById('file-size-display').textContent =
-        (file.size / 1024).toFixed(1) + ' KB  ·  ' + file.type;
+        (file.size / 1024 / 1024).toFixed(2) + ' MB  ·  ' + file.type;
     document.getElementById('file-info').classList.remove('hidden');
     document.getElementById('drop-zone').classList.add('hidden');
     document.getElementById('btn-upload').disabled = false;

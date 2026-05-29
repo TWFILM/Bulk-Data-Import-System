@@ -42,7 +42,7 @@ class ImportController extends Controller
                 "required",
                 "file",
                 "mimes:csv,txt",
-                "max:102400", // 100 MB safety cap
+                "max:40960", // 40 MB — matches php.ini upload_max_filesize
             ],
         ]);
 
@@ -155,52 +155,66 @@ class ImportController extends Controller
             );
         }
 
-        // ── Stream-read the file, build chunk array ──────────────────────────
+        // ── Stream-read the CSV, write each chunk to disk (memory-safe) ─────
+        //    Holding 800k rows in a PHP array before Bus::batch() serialises
+        //    them would exhaust memory.  Instead we write each 1,000-row chunk
+        //    as a small JSON file and pass only the path to the job.
         $handle = fopen($absolutePath, "r");
         $rawHeader = fgetcsv($handle);
         $headers = array_map(fn($h) => strtolower(trim($h)), $rawHeader);
 
-        $chunkSize = 1000; // rows per job
+        $chunkSize = 1000;
         $buffer = [];
-        $allChunks = [];
+        $jobs = [];
+        $chunkIndex = 0;
+        $chunkDir = "imports/chunks/" . uniqid("", true);
+        Storage::makeDirectory($chunkDir);
+
+        $flushChunk = function () use (
+            &$buffer,
+            &$jobs,
+            &$chunkIndex,
+            $chunkDir,
+        ) {
+            if (empty($buffer)) {
+                return;
+            }
+            $path = "{$chunkDir}/chunk_{$chunkIndex}.json";
+            Storage::put($path, json_encode($buffer));
+            $jobs[] = new ProcessImportChunk($path);
+            $buffer = [];
+            $chunkIndex++;
+        };
 
         while (($rawRow = fgetcsv($handle)) !== false) {
-            // Guard: skip rows where column count doesn't match headers
             if (count($rawRow) < count($headers)) {
                 continue;
             }
 
-            // Only take as many values as there are headers (handles extra commas)
             $buffer[] = array_combine(
                 $headers,
                 array_slice($rawRow, 0, count($headers)),
             );
 
             if (count($buffer) >= $chunkSize) {
-                $allChunks[] = $buffer;
-                $buffer = [];
+                $flushChunk();
             }
         }
-
-        // Flush the last partial chunk
-        if (!empty($buffer)) {
-            $allChunks[] = $buffer;
-        }
-
+        $flushChunk(); // flush last partial chunk
         fclose($handle);
 
-        if (empty($allChunks)) {
+        // Delete the original uploaded file immediately — it has been fully
+        // split into chunk files and is no longer needed on disk.
+        Storage::delete($request->file_path);
+
+        if (empty($jobs)) {
+            Storage::deleteDirectory($chunkDir);
             return response()->json(
                 ["error" => "No valid data rows found in the file."],
                 422,
             );
         }
 
-        // ── Build one job per chunk ──────────────────────────────────────────
-        $jobs = array_map(
-            fn($chunk) => new ProcessImportChunk($chunk),
-            $allChunks,
-        );
         $fileName = $request->file_name;
 
         // ── Dispatch the batch ───────────────────────────────────────────────
@@ -245,7 +259,7 @@ class ImportController extends Controller
                 "message" => "Import queued successfully.",
                 "batch_id" => $batch->id,
                 "total_jobs" => count($jobs),
-                "total_rows" => count($allChunks) * $chunkSize, // approximate
+                "total_rows" => $chunkIndex * $chunkSize, // approximate
             ],
             202,
         );
@@ -305,7 +319,7 @@ class ImportController extends Controller
     public function sample(Request $request)
     {
         $total = (int) $request->query("rows", 20);
-        $total = max(1, min($total, 2_000_000)); // clamp: 1 – 2 M
+        $total = max(1, min($total, 1_000_000)); // clamp: 1 – 1 M
 
         $firstNames = [
             "Alice",
@@ -355,7 +369,33 @@ class ImportController extends Controller
         return response()->stream(
             function () use ($total, $firstNames, $lastNames) {
                 $out = fopen("php://output", "w");
-                fputcsv($out, ["name", "email"]);
+
+                $companies = [
+                    "Acme Corp",
+                    "TechStart",
+                    "Global Inc",
+                    "FastForward",
+                    "NextLevel Ltd",
+                    "BrightPath",
+                    "CoreSystems",
+                    "AlphaWave",
+                    "Zenith Co",
+                    "PeakLogic",
+                ];
+                $streets = [
+                    "Main St",
+                    "Oak Ave",
+                    "Maple Rd",
+                    "Cedar Blvd",
+                    "Pine Lane",
+                    "Elm St",
+                    "River Rd",
+                    "Lake Ave",
+                    "Hill Dr",
+                    "Park Way",
+                ];
+
+                fputcsv($out, ["name", "email", "phone", "company", "address"]);
 
                 for ($i = 1; $i <= $total; $i++) {
                     $fn = $firstNames[array_rand($firstNames)];
@@ -363,6 +403,9 @@ class ImportController extends Controller
                     fputcsv($out, [
                         "{$fn} {$ln}",
                         strtolower("{$fn}.{$ln}.{$i}@example.com"),
+                        "0" . rand(800000000, 899999999),
+                        $companies[array_rand($companies)],
+                        rand(1, 999) . " " . $streets[array_rand($streets)],
                     ]);
 
                     // Flush every 5,000 rows to keep memory flat

@@ -89,8 +89,33 @@ class GenerateSampleCsv extends Command
             return self::FAILURE;
         }
 
+        $companies = [
+            "Acme Corp",
+            "TechStart",
+            "Global Inc",
+            "FastForward",
+            "NextLevel Ltd",
+            "BrightPath",
+            "CoreSystems",
+            "AlphaWave",
+            "Zenith Co",
+            "PeakLogic",
+        ];
+        $streets = [
+            "Main St",
+            "Oak Ave",
+            "Maple Rd",
+            "Cedar Blvd",
+            "Pine Lane",
+            "Elm St",
+            "River Rd",
+            "Lake Ave",
+            "Hill Dr",
+            "Park Way",
+        ];
+
         // ── Header ──────────────────────────────────────────────────
-        fputcsv($handle, ["name", "email"]);
+        fputcsv($handle, ["name", "email", "phone", "company", "address"]);
 
         // ── Progress bar ────────────────────────────────────────────
         $bar = $this->output->createProgressBar($rows);
@@ -102,9 +127,13 @@ class GenerateSampleCsv extends Command
         for ($i = 1; $i <= $rows; $i++) {
             $fn = $this->firstNames[array_rand($this->firstNames)];
             $ln = $this->lastNames[array_rand($this->lastNames)];
-            $email = strtolower("{$fn}.{$ln}.{$i}@example.com");
-
-            fputcsv($handle, ["{$fn} {$ln}", $email]);
+            fputcsv($handle, [
+                "{$fn} {$ln}",
+                strtolower("{$fn}.{$ln}.{$i}@example.com"),
+                "0" . rand(800000000, 899999999),
+                $companies[array_rand($companies)],
+                rand(1, 999) . " " . $streets[array_rand($streets)],
+            ]);
             $bar->advance();
         }
 

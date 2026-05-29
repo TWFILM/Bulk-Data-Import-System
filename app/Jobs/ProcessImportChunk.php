@@ -11,6 +11,7 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 use Throwable;
 
 class ProcessImportChunk implements ShouldQueue
@@ -19,24 +20,22 @@ class ProcessImportChunk implements ShouldQueue
 
     /**
      * Maximum attempts before the job is considered failed.
-     * Useful when a DB is temporarily unavailable.
      */
     public int $tries = 3;
 
     /**
      * Max execution time per chunk (seconds).
-     * 1,000 rows × bulk insert should never exceed 30 s.
      */
     public int $timeout = 120;
 
     // ---------------------------------------------------------------
-    // Constructor
+    // Constructor — receives a storage path to a JSON chunk file
     // ---------------------------------------------------------------
 
     /**
-     * @param  array<int, array<string, string>>  $rows   Pre-parsed CSV rows
+     * @param  string  $chunkPath  Storage-relative path to the JSON chunk file
      */
-    public function __construct(public readonly array $rows) {}
+    public function __construct(public readonly string $chunkPath) {}
 
     // ---------------------------------------------------------------
     // Handler
@@ -44,18 +43,29 @@ class ProcessImportChunk implements ShouldQueue
 
     public function handle(): void
     {
-        // If the whole batch was cancelled mid-flight, skip silently.
         if ($this->batch()->cancelled()) {
+            Storage::delete($this->chunkPath);
             return;
         }
 
+        // ── 1. Read rows from disk (not from serialised job payload) ──────────
+        $json = Storage::get($this->chunkPath);
+
+        if (!$json) {
+            Log::warning("[ProcessImportChunk] Chunk file missing, skipping.", [
+                "path" => $this->chunkPath,
+            ]);
+            return;
+        }
+
+        $rows = json_decode($json, true);
         $batchId = $this->batch()->id;
         $now = now();
 
-        // ── 1. Build the payload, filtering out rows missing required fields ──
+        // ── 2. Build insert payload, filtering malformed rows ─────────────────
         $insertData = [];
 
-        foreach ($this->rows as $row) {
+        foreach ($rows as $row) {
             $name = trim($row["name"] ?? "");
             $email = strtolower(trim($row["email"] ?? ""));
 
@@ -64,38 +74,39 @@ class ProcessImportChunk implements ShouldQueue
                 $email === "" ||
                 !filter_var($email, FILTER_VALIDATE_EMAIL)
             ) {
-                continue; // skip malformed rows without failing the whole job
+                continue;
             }
 
             $insertData[] = [
                 "name" => $name,
                 "email" => $email,
+                "phone" => trim($row["phone"] ?? "") ?: null,
+                "company" => trim($row["company"] ?? "") ?: null,
+                "address" => trim($row["address"] ?? "") ?: null,
                 "import_batch_id" => $batchId,
                 "created_at" => $now,
                 "updated_at" => $now,
             ];
         }
 
-        if (empty($insertData)) {
-            return; // nothing valid in this chunk
-        }
-
-        // ── 2. Bulk insert inside a transaction; skip duplicate emails ─────────
+        // ── 3. Bulk insert, skip duplicate emails ─────────────────────────────
         $inserted = 0;
 
-        DB::transaction(function () use ($insertData, &$inserted) {
-            // insertOrIgnore returns the number of rows actually written.
-            // Duplicate e-mails (unique constraint) are silently skipped.
-            $inserted = Customer::insertOrIgnore($insertData);
-        });
+        if (!empty($insertData)) {
+            DB::transaction(function () use ($insertData, &$inserted) {
+                $inserted = Customer::insertOrIgnore($insertData);
+            });
 
-        // ── 3. Atomically increment the counter on the history record ─────────
-        if ($inserted > 0) {
-            ImportHistory::where("id", $batchId)->increment(
-                "items_added",
-                $inserted,
-            );
+            if ($inserted > 0) {
+                ImportHistory::where("id", $batchId)->increment(
+                    "items_added",
+                    $inserted,
+                );
+            }
         }
+
+        // ── 4. Clean up chunk file from disk ──────────────────────────────────
+        Storage::delete($this->chunkPath);
     }
 
     // ---------------------------------------------------------------
@@ -106,8 +117,10 @@ class ProcessImportChunk implements ShouldQueue
     {
         Log::error("[ProcessImportChunk] Job failed", [
             "batch_id" => $this->batch()?->id,
-            "rows" => count($this->rows),
+            "chunk" => $this->chunkPath,
             "exception" => $exception->getMessage(),
         ]);
+
+        // Leave the chunk file on disk so it can be inspected / retried
     }
 }

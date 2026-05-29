@@ -20,11 +20,14 @@ Files are processed in **1,000-row chunks**, each dispatched as an independent b
 - **Streaming file upload** — 100 MB cap, stored to local disk before processing
 - **Header validation** — checks for required columns before any data is written
 - **Chunked batch processing** — 1,000 rows per job, fully parallelisable
+- **File-based chunking** — chunk data written to disk as JSON, not held in memory; supports files with millions of rows without exhausting PHP memory
+- **Zero disk residue** — uploaded file deleted immediately after chunking; chunk files deleted after each job completes
 - **Duplicate handling** — `insertOrIgnore` silently skips duplicate emails
 - **Real-time progress polling** — live percentage, row count, job status
 - **Import history** — every run is recorded with file name, status, and rows inserted
 - **Fault tolerant** — failed chunks are retried up to 3 times; one bad chunk does not cancel the rest
-- **Sample CSV generator** — browser download or Artisan command, up to 2 million rows
+- **Client-side file validation** — rejects files over 40 MB before upload begins
+- **Sample CSV generator** — browser download or Artisan command, up to 1 million rows
 
 ---
 
@@ -36,7 +39,7 @@ Files are processed in **1,000-row chunks**, each dispatched as an independent b
 | Database | SQLite (swappable to MySQL / PostgreSQL) |
 | Queue | Laravel Job Batching (`database` driver) |
 | Frontend | Blade + Tailwind CSS (CDN) |
-| Background jobs | `ProcessImportChunk` — bulk insert per chunk |
+| Background jobs | `ProcessImportChunk` — reads chunk JSON from disk, bulk inserts, deletes file |
 
 ---
 
@@ -96,6 +99,9 @@ Keep this process running while you test imports. Without it, dispatched jobs wi
 | `id` | bigint PK | Auto-increment |
 | `name` | string | |
 | `email` | string UNIQUE | Duplicate emails are skipped on import |
+| `phone` | string nullable | |
+| `company` | string nullable | |
+| `address` | string nullable | |
 | `import_batch_id` | string (FK) | Links back to the import run |
 | `created_at / updated_at` | timestamp | |
 
@@ -124,7 +130,7 @@ Keep this process running while you test imports. Without it, dispatched jobs wi
 
 ### Sample CSV endpoint
 
-Accepts an optional `rows` query parameter (default: 20, max: 2,000,000):
+Accepts an optional `rows` query parameter (default: 20, max: 1,000,000):
 
 ```
 GET /import/sample?rows=100000
@@ -134,17 +140,26 @@ GET /import/sample?rows=100000
 
 ## CSV Format
 
-The imported file must be a UTF-8 CSV with **at minimum** these two columns:
+The imported file must be a UTF-8 CSV with **at minimum** the two required columns:
 
 ```csv
-name,email
-Alice Smith,alice.smith@example.com
-Bob Johnson,bob.johnson@example.com
+name,email,phone,company,address
+Alice Smith,alice.smith@example.com,0812345678,Acme Corp,123 Main St
+Bob Johnson,bob.johnson@example.com,,,
 ```
+
+| Column | Required | Notes |
+|---|---|---|
+| `name` | ✅ | Full name |
+| `email` | ✅ | Must be valid format. Duplicates are skipped. |
+| `phone` | Optional | Stored as-is |
+| `company` | Optional | |
+| `address` | Optional | |
 
 - Column order does not matter
 - Extra columns are ignored
 - Rows with a blank name, blank email, or invalid email format are skipped silently
+- Maximum file size: **40 MB**
 
 ---
 
@@ -219,10 +234,10 @@ graph TD
     J --> I
 ```
 
-1. **Upload** — the CSV is stored to `storage/app/imports/` and the path is returned to the browser.
+1. **Upload** — the CSV is stored temporarily to `storage/app/private/imports/` and the path is returned to the browser.
 2. **Validate** — the server opens the file, reads only the header row, and checks for `name` and `email`.
-3. **Execute** — the file is stream-read in a single pass, split into chunks of 1,000 rows, and each chunk becomes one `ProcessImportChunk` job inside a `Bus::batch()`. The HTTP response returns immediately with the Batch UUID.
-4. **Monitor** — the browser polls `/import/status/{batchId}` every 2 seconds, displaying live percentage, pending jobs, and rows inserted.
+3. **Execute** — the file is stream-read in a single pass; each 1,000-row chunk is written as a JSON file to disk, and a `ProcessImportChunk` job (holding only the file path) is added to the batch. The original uploaded file is deleted immediately after chunking. The HTTP response returns with the Batch UUID.
+4. **Monitor** — the browser polls `/import/status/{batchId}` every 2 seconds, displaying live percentage, pending jobs, and rows inserted. Each worker reads its chunk JSON, bulk-inserts the rows, then deletes the chunk file.
 
 ---
 
